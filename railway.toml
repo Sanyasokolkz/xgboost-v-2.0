@@ -2,11 +2,10 @@
 builder = "nixpacks"
 
 [deploy]
+startCommand = "python app.py"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
-restartPolicyType = "ON_FAILURE"
+restartPolicyType = "on_failure"
 
-[variables]
+[environments.production.variables]
 FLASK_ENV = "production"
-PYTHONPATH = "/app"
-PYTHONUNBUFFERED = "1"
