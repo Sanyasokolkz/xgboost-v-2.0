@@ -1,5 +1,5 @@
 """
-Solana Memtoken Predictor API - Полная версия
+Solana Memtoken Predictor API - Исправленная версия для gunicorn
 Развертывание на Railway.app с поддержкой текстового парсинга
 """
 
@@ -71,9 +71,7 @@ def parse_time(time_str):
     return total_minutes if total_minutes > 0 else np.nan
 
 def parse_alpha_one_text(text):
-    """
-    Парсит текст формата alpha_one и извлекает структурированные данные
-    """
+    """Парсит текст формата alpha_one и извлекает структурированные данные"""
     if not text or not isinstance(text, str):
         return {}
     
@@ -148,7 +146,7 @@ def parse_alpha_one_text(text):
         if top10_match:
             data['top10_percent'] = float(top10_match.group(1))
         
-        # Total holders - ищем после "Total:" но НЕ после "Total:" с процентами
+        # Total holders
         holders_match = re.search(r'Total:\s*([0-9]+)(?:\s|$)', text)
         if holders_match:
             data['total_holders'] = int(holders_match.group(1))
@@ -159,7 +157,6 @@ def parse_alpha_one_text(text):
             data['insiders_count'] = int(insiders_match.group(1))
             data['insiders_percent'] = float(insiders_match.group(2))
         else:
-            # Если нет hold, попробуем найти просто проценты
             insiders_pct_match = re.search(r'Insiders:.*?([0-9.]+)%', text)
             if insiders_pct_match:
                 data['insiders_percent'] = float(insiders_pct_match.group(1))
@@ -211,7 +208,7 @@ def apply_feature_engineering(df, model_artifacts):
         if 'token_age' in df.columns:
             df['token_age_minutes'] = df['token_age'].apply(parse_time)
         
-        # Создаем ключевые признаки (базовые)
+        # Создаем ключевые признаки
         if 'liquidity_numeric' in df.columns and 'market_cap_numeric' in df.columns:
             df['liquidity_ratio'] = df['liquidity_numeric'] / (df['market_cap_numeric'] + 1)
             df['liquidity_ratio_log'] = np.log1p(df['liquidity_ratio'])
@@ -224,7 +221,7 @@ def apply_feature_engineering(df, model_artifacts):
             df['holders_per_mcap'] = df['total_holders'] / (df['market_cap_numeric'] / 1000 + 1)
             df['holder_density'] = np.log1p(df['holders_per_mcap'])
         
-        # Анализ держателей
+        # Остальные признаки...
         holder_cols = ['green_holders', 'blue_holders', 'yellow_holders', 'circle_holders']
         available_holders = [col for col in holder_cols if col in df.columns]
         
@@ -270,55 +267,21 @@ def apply_feature_engineering(df, model_artifacts):
         if 'total_holders' in df.columns and 'top10_percent' in df.columns:
             df['holders_concentration'] = df['total_holders'] * (100 - df['top10_percent']) / 100
         
-        # Дополнительные признаки (из улучшенной модели)
-        # Нелинейные трансформации
+        # Дополнительные признаки (упрощенная версия)
         if 'liquidity_ratio' in df.columns:
             df['liquidity_ratio_squared'] = df['liquidity_ratio'] ** 2
             df['liquidity_ratio_sqrt'] = np.sqrt(df['liquidity_ratio'].clip(0))
         
-        # Биннинг
         if 'total_holders' in df.columns:
             df['holders_bins'] = pd.cut(df['total_holders'], 
                                        bins=[0, 50, 150, 300, 1000, float('inf')], 
                                        labels=[0, 1, 2, 3, 4]).astype(float)
         
-        if 'top10_percent' in df.columns:
-            df['concentration_level'] = pd.cut(df['top10_percent'], 
-                                              bins=[0, 20, 40, 60, 80, 100], 
-                                              labels=[0, 1, 2, 3, 4]).astype(float)
-        
-        # Комплексные взаимодействия
-        if 'insiders_percent' in df.columns and 'dev_holds_percent' in df.columns:
-            df['insider_dev_interaction'] = df['insiders_percent'] * df['dev_holds_percent']
-        
-        if 'total_risk_score' in df.columns and 'top10_percent' in df.columns:
-            df['risk_concentration'] = df['total_risk_score'] * df['top10_percent'] / 100
-        
-        # Временные паттерны
         if 'token_age_minutes' in df.columns:
             df['is_fresh'] = (df['token_age_minutes'] < 30).astype(int)
             df['is_golden_hour'] = ((df['token_age_minutes'] >= 30) & 
                                    (df['token_age_minutes'] < 120)).astype(int)
             df['is_mature'] = (df['token_age_minutes'] >= 120).astype(int)
-        
-        # Качество держателей
-        if len(available_holders) >= 2 and 'total_holders' in df.columns:
-            df['quality_holder_ratio'] = df[available_holders].sum(axis=1) / (df['total_holders'] + 1)
-            df['holder_quality_score'] = (df.get('green_holders', 0) * 3 + 
-                                         df.get('blue_holders', 0) * 2 + 
-                                         df.get('yellow_holders', 0) * 1) / (df['total_holders'] + 1)
-        
-        # Активность и эффективность
-        if all(col in df.columns for col in ['volume_1min_numeric', 'liquidity_numeric', 'market_cap_numeric']):
-            df['volume_mcap_ratio'] = df['volume_1min_numeric'] / (df['market_cap_numeric'] + 1)
-            df['liquidity_efficiency'] = df['volume_1min_numeric'] / (df['liquidity_numeric'] + 1)
-            df['activity_composite'] = (np.log1p(df['volume_mcap_ratio']) + 
-                                       np.log1p(df['liquidity_efficiency'])) / 2
-        
-        # Манипуляции и снайперы
-        if all(col in df.columns for col in ['snipers_count', 'total_holders', 'insiders_percent']):
-            df['sniper_insider_combo'] = (df['snipers_count'] / (df['total_holders'] + 1)) * df['insiders_percent']
-            df['manipulation_risk'] = (df.get('sniper_density', 0) + df['insiders_percent']) / 2
         
         # Категориальные признаки
         if 'token_age_minutes' in df.columns and model_artifacts.get('label_encoder'):
@@ -328,11 +291,10 @@ def apply_feature_engineering(df, model_artifacts):
             try:
                 df['age_category_encoded'] = model_artifacts['label_encoder'].transform(age_category.fillna('unknown'))
             except:
-                df['age_category_encoded'] = 0  # Fallback
+                df['age_category_encoded'] = 0
         
     except Exception as e:
         logger.error(f"Ошибка в feature engineering: {str(e)}")
-        # Продолжаем с тем, что получилось
     
     return df
 
@@ -340,31 +302,55 @@ def load_model():
     """Загружает модель при старте приложения"""
     global model_artifacts
     
+    # ДИАГНОСТИКА
+    logger.info("🔍 ДИАГНОСТИКА ФАЙЛОВ:")
+    logger.info(f"Текущая директория: {os.getcwd()}")
+    logger.info(f"Файлы в директории: {os.listdir('.')}")
+    
+    # Проверяем конкретно файл модели
+    model_files = ['solana_memtoken_model.pkl', 'solana_memtoken_model_pickle.pkl']
+    for model_file in model_files:
+        exists = os.path.exists(model_file)
+        logger.info(f"Файл {model_file}: {'✅ НАЙДЕН' if exists else '❌ НЕ НАЙДЕН'}")
+        if exists:
+            size = os.path.getsize(model_file) / 1024 / 1024
+            logger.info(f"  Размер: {size:.1f} MB")
+    
     try:
         # Пытаемся загрузить основной файл модели
         if os.path.exists('solana_memtoken_model.pkl'):
+            logger.info("🔄 Попытка загрузки solana_memtoken_model.pkl...")
             model_artifacts = joblib.load('solana_memtoken_model.pkl')
             logger.info("✅ Модель загружена из solana_memtoken_model.pkl")
         elif os.path.exists('solana_memtoken_model_pickle.pkl'):
+            logger.info("🔄 Попытка загрузки solana_memtoken_model_pickle.pkl...")
             with open('solana_memtoken_model_pickle.pkl', 'rb') as f:
                 model_artifacts = pickle.load(f)
             logger.info("✅ Модель загружена из solana_memtoken_model_pickle.pkl")
         else:
+            logger.error("❌ НИ ОДИН ФАЙЛ МОДЕЛИ НЕ НАЙДЕН!")
             raise FileNotFoundError("Файлы модели не найдены")
         
         # Проверяем целостность модели
         required_keys = ['model', 'imputer', 'scaler', 'feature_names']
+        missing_keys = []
         for key in required_keys:
             if key not in model_artifacts:
-                raise KeyError(f"Отсутствует ключ: {key}")
+                missing_keys.append(key)
         
-        logger.info(f"Модель содержит {len(model_artifacts['feature_names'])} признаков")
-        logger.info(f"Тип модели: {model_artifacts.get('model_type', 'Unknown')}")
+        if missing_keys:
+            logger.error(f"❌ Отсутствуют ключи в модели: {missing_keys}")
+            raise KeyError(f"Отсутствуют ключи: {missing_keys}")
+        
+        logger.info(f"✅ Модель содержит {len(model_artifacts['feature_names'])} признаков")
+        logger.info(f"✅ Тип модели: {model_artifacts.get('model_type', 'Unknown')}")
         
         return True
         
     except Exception as e:
-        logger.error(f"❌ Ошибка загрузки модели: {str(e)}")
+        logger.error(f"❌ КРИТИЧЕСКАЯ ОШИБКА загрузки модели: {str(e)}")
+        logger.error(f"❌ Тип ошибки: {type(e).__name__}")
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
         return False
 
 def predict_token_success(token_data):
@@ -375,12 +361,10 @@ def predict_token_success(token_data):
         
         # Проверяем, это текстовые данные alpha_one или структурированные
         if isinstance(token_data, dict) and len(token_data) == 1:
-            # Возможно это alpha_one формат
             first_key = list(token_data.keys())[0]
             first_value = token_data[first_key]
             
             if isinstance(first_value, str) and len(first_value) > 100:
-                # Это похоже на alpha_one текст
                 logger.info("Обнаружен alpha_one формат, парсим текст...")
                 parsed_data = parse_alpha_one_text(first_value)
                 if parsed_data:
@@ -467,6 +451,17 @@ def predict_token_success(token_data):
             'probability_percent': '0.0%'
         }
 
+# ====================================================================
+# КРИТИЧНО: ИНИЦИАЛИЗАЦИЯ МОДЕЛИ ПРИ ИМПОРТЕ МОДУЛЯ
+# ====================================================================
+
+# Загружаем модель сразу при импорте модуля (для gunicorn)
+logger.info("🚀 Инициализация Solana Memtoken Predictor...")
+if not load_model():
+    logger.error("❌ Не удалось загрузить модель при инициализации!")
+else:
+    logger.info("✅ Модель успешно загружена при инициализации")
+
 # =============================================================================
 # ROUTES (Маршруты API)
 # =============================================================================
@@ -474,7 +469,19 @@ def predict_token_success(token_data):
 @app.route('/')
 def home():
     """Главная страница"""
-    return render_template('index.html')
+    return jsonify({
+        'service': 'Solana Memtoken Predictor',
+        'version': MODEL_VERSION,
+        'model_loaded': model_artifacts is not None,
+        'endpoints': [
+            'GET /',
+            'GET /health',
+            'GET /debug',
+            'POST /api/predict',
+            'POST /api/batch_predict',
+            'GET /api/model_info'
+        ]
+    })
 
 @app.route('/health')
 def health_check():
@@ -485,6 +492,38 @@ def health_check():
         'version': MODEL_VERSION,
         'timestamp': datetime.now().isoformat()
     })
+
+@app.route('/debug')
+def debug_info():
+    """Диагностическая информация"""
+    try:
+        files_info = {}
+        for file in os.listdir('.'):
+            if os.path.isfile(file):
+                files_info[file] = {
+                    'size_mb': round(os.path.getsize(file) / 1024 / 1024, 2),
+                    'exists': True
+                }
+        
+        return jsonify({
+            'success': True,
+            'current_directory': os.getcwd(),
+            'files': files_info,
+            'model_files_check': {
+                'solana_memtoken_model.pkl': os.path.exists('solana_memtoken_model.pkl'),
+                'solana_memtoken_model_pickle.pkl': os.path.exists('solana_memtoken_model_pickle.pkl')
+            },
+            'model_artifacts_loaded': model_artifacts is not None,
+            'model_features_count': len(model_artifacts['feature_names']) if model_artifacts else 0,
+            'python_version': os.sys.version,
+            'port': os.environ.get('PORT', 'Not set')
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
 
 @app.route('/api/predict', methods=['POST'])
 def api_predict():
@@ -502,7 +541,7 @@ def api_predict():
                 'error': 'Нет данных для анализа'
             }), 400
         
-        # Логируем запрос (без чувствительных данных)
+        # Логируем запрос
         logger.info(f"Получен запрос на предсказание: {len(token_data)} параметров")
         
         # Делаем предсказание
@@ -530,7 +569,7 @@ def api_batch_predict():
             }), 400
         
         tokens = data['tokens']
-        if len(tokens) > 100:  # Ограничение на количество
+        if len(tokens) > 100:
             return jsonify({
                 'success': False,
                 'error': 'Слишком много токенов. Максимум 100 за раз.'
@@ -562,34 +601,6 @@ def api_batch_predict():
             'error': str(e)
         }), 500
 
-@app.route('/api/parse_text', methods=['POST'])
-def api_parse_text():
-    """Эндпоинт для парсинга alpha_one текста"""
-    try:
-        data = request.get_json()
-        
-        if not data or 'text' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'Требуется поле "text"'
-            }), 400
-        
-        text = data['text']
-        parsed_data = parse_alpha_one_text(text)
-        
-        return jsonify({
-            'success': True,
-            'parsed_data': parsed_data,
-            'fields_extracted': len(parsed_data)
-        })
-        
-    except Exception as e:
-        logger.error(f"Ошибка парсинга: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
 @app.route('/api/model_info')
 def model_info():
     """Информация о модели"""
@@ -605,7 +616,7 @@ def model_info():
             'version': MODEL_VERSION,
             'type': model_artifacts.get('model_type', 'Unknown'),
             'features_count': len(model_artifacts['feature_names']),
-            'feature_names': model_artifacts['feature_names'][:20],  # Первые 20
+            'feature_names': model_artifacts['feature_names'][:20],
             'performance_metrics': model_artifacts.get('performance_metrics', {}),
             'threshold': model_artifacts.get('best_threshold', 0.5),
             'training_info': model_artifacts.get('training_info', {})
@@ -627,25 +638,18 @@ def internal_error(error):
     }), 500
 
 # =============================================================================
-# ЗАПУСК ПРИЛОЖЕНИЯ
+# ЗАПУСК ПРИЛОЖЕНИЯ (только для локальной разработки)
 # =============================================================================
 
 if __name__ == '__main__':
-    # Загружаем модель при старте
-    logger.info("🚀 Запуск Solana Memtoken Predictor...")
+    # Этот блок выполняется только при прямом запуске python app.py
+    # При запуске через gunicorn этот блок НЕ выполняется
     
-    if not load_model():
-        logger.error("❌ Не удалось загрузить модель. Выход.")
-        exit(1)
-    
-    # Получаем порт из переменной окружения (Railway)
     port = int(os.environ.get('PORT', 5000))
+    logger.info(f"✅ Локальный запуск на порту {port}")
     
-    logger.info(f"✅ Сервер запускается на порту {port}")
-    
-    # Запускаем Flask приложение
     app.run(
         host='0.0.0.0',
         port=port,
-        debug=os.environ.get('FLASK_ENV') == 'development'
+        debug=False
     )
