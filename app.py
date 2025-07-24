@@ -1,6 +1,6 @@
 """
-Solana Memtoken Predictor API - Исправленная версия для gunicorn
-Развертывание на Railway.app с поддержкой текстового парсинга
+Solana Memtoken Predictor API - Финальная версия
+Развертывание на Railway.app с поддержкой alpha_one текстового парсинга
 """
 
 import os
@@ -79,10 +79,10 @@ def parse_alpha_one_text(text):
     
     try:
         # Извлекаем токен символ и название
-        token_match = re.search(r'\$(\w+)\s*\|\s*(\w+)', text)
+        token_match = re.search(r'\$(\w+)\s*\|\s*([^|\n]+)', text)
         if token_match:
-            data['token_symbol'] = token_match.group(1)
-            data['token_name'] = token_match.group(2)
+            data['token_symbol'] = token_match.group(1).strip()
+            data['token_name'] = token_match.group(2).strip()
         
         # Адрес токена
         address_match = re.search(r'([A-Za-z0-9]{40,50})', text)
@@ -185,6 +185,234 @@ def parse_alpha_one_text(text):
         logger.info(f"Извлечено полей из текста: {len(data)}")
         
     except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        })
+
+@app.route('/api/check_features')
+def check_features():
+    """Проверяет какие признаки ожидает модель"""
+    if model_artifacts is None:
+        return jsonify({'error': 'Модель не загружена'}), 503
+    
+    expected_features = model_artifacts['feature_names']
+    
+    return jsonify({
+        'success': True,
+        'expected_features_count': len(expected_features),
+        'expected_features': expected_features,
+        'model_type': model_artifacts.get('model_type', 'Unknown'),
+        'sample_features': expected_features[:20]  # Первые 20 для примера
+    })
+
+@app.route('/api/predict', methods=['POST'])
+def api_predict():
+    """API эндпоинт для предсказания"""
+    try:
+        # Получаем данные из запроса
+        if request.is_json:
+            token_data = request.get_json()
+        else:
+            token_data = request.form.to_dict()
+        
+        if not token_data:
+            return jsonify({
+                'success': False,
+                'error': 'Нет данных для анализа'
+            }), 400
+        
+        # Логируем запрос
+        logger.info(f"Получен запрос на предсказание: {len(token_data)} параметров")
+        
+        # Делаем предсказание
+        result = predict_token_success(token_data)
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        logger.error(f"Ошибка в API: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': f'Внутренняя ошибка сервера: {str(e)}'
+        }), 500
+
+@app.route('/api/batch_predict', methods=['POST'])
+def api_batch_predict():
+    """Пакетное предсказание для нескольких токенов"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'tokens' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'Неверный формат данных. Ожидается: {"tokens": [...]}'
+            }), 400
+        
+        tokens = data['tokens']
+        if len(tokens) > 100:
+            return jsonify({
+                'success': False,
+                'error': 'Слишком много токенов. Максимум 100 за раз.'
+            }), 400
+        
+        results = []
+        for i, token_data in enumerate(tokens):
+            try:
+                result = predict_token_success(token_data)
+                result['token_index'] = i
+                results.append(result)
+            except Exception as e:
+                results.append({
+                    'token_index': i,
+                    'success': False,
+                    'error': str(e)
+                })
+        
+        return jsonify({
+            'success': True,
+            'results': results,
+            'total_processed': len(results)
+        })
+        
+    except Exception as e:
+        logger.error(f"Ошибка в batch API: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/debug_features', methods=['POST'])
+def debug_features():
+    """Отладка создания признаков"""
+    try:
+        token_data = request.get_json()
+        
+        if not token_data:
+            return jsonify({'error': 'Нет данных'}), 400
+        
+        # Парсим alpha_one если нужно
+        if isinstance(token_data, dict) and len(token_data) == 1:
+            first_key = list(token_data.keys())[0]
+            first_value = token_data[first_key]
+            
+            if isinstance(first_value, str) and len(first_value) > 100:
+                parsed_data = parse_alpha_one_text(first_value)
+                if parsed_data:
+                    token_data = parsed_data
+        
+        # Создаем DataFrame
+        df_input = pd.DataFrame([token_data])
+        
+        # Применяем feature engineering
+        df_processed = apply_feature_engineering(df_input, model_artifacts)
+        
+        # Сравниваем с ожидаемыми признаками
+        expected_features = set(model_artifacts['feature_names'])
+        created_features = set(df_processed.columns)
+        
+        missing_features = expected_features - created_features
+        extra_features = created_features - expected_features
+        
+        return jsonify({
+            'success': True,
+            'parsed_fields': len(token_data),
+            'expected_features_count': len(expected_features),
+            'created_features_count': len(created_features),
+            'missing_features': list(missing_features)[:20],  # Первые 20
+            'extra_features': list(extra_features)[:20],
+            'sample_created_features': list(created_features)[:20],
+            'input_data': token_data
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }), 500
+
+@app.route('/api/parse_text', methods=['POST'])
+def api_parse_text():
+    """Эндпоинт для парсинга alpha_one текста"""
+    try:
+        data = request.get_json()
+        
+        if not data or 'text' not in data:
+            return jsonify({
+                'success': False,
+                'error': 'Требуется поле "text"'
+            }), 400
+        
+        text = data['text']
+        parsed_data = parse_alpha_one_text(text)
+        
+        return jsonify({
+            'success': True,
+            'parsed_data': parsed_data,
+            'fields_extracted': len(parsed_data)
+        })
+        
+    except Exception as e:
+        logger.error(f"Ошибка парсинга: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
+@app.route('/api/model_info')
+def model_info():
+    """Информация о модели"""
+    if model_artifacts is None:
+        return jsonify({
+            'success': False,
+            'error': 'Модель не загружена'
+        }), 503
+    
+    return jsonify({
+        'success': True,
+        'model_info': {
+            'version': MODEL_VERSION,
+            'type': model_artifacts.get('model_type', 'Unknown'),
+            'features_count': len(model_artifacts['feature_names']),
+            'feature_names': model_artifacts['feature_names'][:20],
+            'performance_metrics': model_artifacts.get('performance_metrics', {}),
+            'threshold': model_artifacts.get('best_threshold', 0.5),
+            'training_info': model_artifacts.get('training_info', {})
+        }
+    })
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        'success': False,
+        'error': 'Эндпоинт не найден'
+    }), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    return jsonify({
+        'success': False,
+        'error': 'Внутренняя ошибка сервера'
+    }), 500
+
+# =============================================================================
+# ЗАПУСК ПРИЛОЖЕНИЯ (только для локальной разработки)
+# =============================================================================
+
+if __name__ == '__main__':
+    # Этот блок выполняется только при прямом запуске python app.py
+    # При запуске через gunicorn этот блок НЕ выполняется
+    
+    port = int(os.environ.get('PORT', 5000))
+    logger.info(f"✅ Локальный запуск на порту {port}")
+    
+    app.run(
+        host='0.0.0.0',
+        port=port,
+        debug=False
+    ) e:
         logger.error(f"Ошибка парсинга текста: {str(e)}")
     
     return data
@@ -333,31 +561,11 @@ def apply_feature_engineering(df, model_artifacts):
             except:
                 df['age_category_encoded'] = 0  # Fallback
         
-        # Заполняем отсутствующие колонки нулями
-        expected_features = model_artifacts['feature_names']
-        logger.info(f"Ожидаемых признаков: {len(expected_features)}")
-        logger.info(f"Создано признаков: {len([col for col in df.columns if col in expected_features])}")
-        
-        missing_features = []
-        for feature in expected_features:
-            if feature not in df.columns:
-                df[feature] = 0.0
-                missing_features.append(feature)
-        
-        if missing_features:
-            logger.warning(f"Заполнены нулями отсутствующие признаки ({len(missing_features)}): {missing_features[:10]}...")
-        
         logger.info("✅ Feature engineering завершен успешно")
         
     except Exception as e:
         logger.error(f"Ошибка в feature engineering: {str(e)}")
         logger.error(traceback.format_exc())
-        
-        # В случае ошибки заполняем все ожидаемые признаки нулями
-        if 'model_artifacts' in locals() and model_artifacts:
-            for feature in model_artifacts['feature_names']:
-                if feature not in df.columns:
-                    df[feature] = 0.0
     
     return df
 
@@ -417,7 +625,7 @@ def load_model():
         return False
 
 def predict_token_success(token_data):
-    """Основная функция предсказания"""
+    """Основная функция предсказания с проверкой признаков"""
     try:
         if model_artifacts is None:
             raise ValueError("Модель не загружена")
@@ -443,19 +651,42 @@ def predict_token_success(token_data):
         # Применяем feature engineering
         df_processed = apply_feature_engineering(df_input, model_artifacts)
         
-        # Добавляем недостающие признаки
-        for feature in model_artifacts['feature_names']:
-            if feature not in df_processed.columns:
-                df_processed[feature] = 0.0
+        # КРИТИЧНО: проверяем соответствие признаков модели
+        expected_features = model_artifacts['feature_names']
+        logger.info(f"Ожидаемых признаков: {len(expected_features)}")
         
-        # Отбираем нужные признаки в правильном порядке
-        X_input = df_processed[model_artifacts['feature_names']]
+        # Создаем DataFrame только с ожидаемыми признаками в правильном порядке
+        X_input = pd.DataFrame(index=df_processed.index)
+        
+        missing_features = []
+        for feature in expected_features:
+            if feature in df_processed.columns:
+                X_input[feature] = df_processed[feature]
+            else:
+                X_input[feature] = 0.0  # Заполняем отсутствующие нулями
+                missing_features.append(feature)
+        
+        if missing_features:
+            logger.warning(f"Отсутствующие признаки заполнены нулями: {missing_features[:10]}...")
+        
+        logger.info(f"Финальная матрица признаков: {X_input.shape}")
+        logger.info(f"Порядок признаков соответствует модели: {list(X_input.columns) == expected_features}")
+        
+        # Проверяем, что у нас точно те же признаки
+        if list(X_input.columns) != expected_features:
+            logger.error("Несоответствие порядка признаков!")
+            # Принудительно переупорядочиваем
+            X_input = X_input[expected_features]
         
         # Применяем preprocessing
+        logger.info("Применяем imputer...")
         X_imputed = model_artifacts['imputer'].transform(X_input)
+        
+        logger.info("Применяем scaler...")
         X_scaled = model_artifacts['scaler'].transform(X_imputed)
         
         # Получаем предсказания
+        logger.info("Получаем предсказания модели...")
         probability = float(model_artifacts['model'].predict_proba(X_scaled)[0, 1])
         
         # Определяем порог
@@ -494,6 +725,7 @@ def predict_token_success(token_data):
             'recommendation_color': recommendation_color,
             'threshold_used': threshold,
             'parsed_fields': len(token_data) if isinstance(token_data, dict) else 0,
+            'missing_features_count': len(missing_features),
             'model_info': {
                 'type': model_artifacts.get('model_type', 'Unknown'),
                 'version': MODEL_VERSION,
@@ -501,6 +733,7 @@ def predict_token_success(token_data):
             }
         }
         
+        logger.info(f"✅ Предсказание успешно: {result['prediction']} ({result['probability_percent']})")
         return result
         
     except Exception as e:
@@ -536,12 +769,16 @@ def home():
         'service': 'Solana Memtoken Predictor',
         'version': MODEL_VERSION,
         'model_loaded': model_artifacts is not None,
+        'model_type': model_artifacts.get('model_type', 'Unknown') if model_artifacts else None,
+        'features_count': len(model_artifacts['feature_names']) if model_artifacts else 0,
         'endpoints': [
             'GET /',
             'GET /health',
             'GET /debug',
+            'GET /api/check_features',
             'POST /api/predict',
             'POST /api/batch_predict',
+            'POST /api/debug_features',
             'GET /api/model_info'
         ]
     })
@@ -581,138 +818,4 @@ def debug_info():
             'python_version': os.sys.version,
             'port': os.environ.get('PORT', 'Not set')
         })
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'traceback': traceback.format_exc()
-        })
-
-@app.route('/api/predict', methods=['POST'])
-def api_predict():
-    """API эндпоинт для предсказания"""
-    try:
-        # Получаем данные из запроса
-        if request.is_json:
-            token_data = request.get_json()
-        else:
-            token_data = request.form.to_dict()
-        
-        if not token_data:
-            return jsonify({
-                'success': False,
-                'error': 'Нет данных для анализа'
-            }), 400
-        
-        # Логируем запрос
-        logger.info(f"Получен запрос на предсказание: {len(token_data)} параметров")
-        
-        # Делаем предсказание
-        result = predict_token_success(token_data)
-        
-        return jsonify(result)
-        
-    except Exception as e:
-        logger.error(f"Ошибка в API: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': f'Внутренняя ошибка сервера: {str(e)}'
-        }), 500
-
-@app.route('/api/batch_predict', methods=['POST'])
-def api_batch_predict():
-    """Пакетное предсказание для нескольких токенов"""
-    try:
-        data = request.get_json()
-        
-        if not data or 'tokens' not in data:
-            return jsonify({
-                'success': False,
-                'error': 'Неверный формат данных. Ожидается: {"tokens": [...]}'
-            }), 400
-        
-        tokens = data['tokens']
-        if len(tokens) > 100:
-            return jsonify({
-                'success': False,
-                'error': 'Слишком много токенов. Максимум 100 за раз.'
-            }), 400
-        
-        results = []
-        for i, token_data in enumerate(tokens):
-            try:
-                result = predict_token_success(token_data)
-                result['token_index'] = i
-                results.append(result)
-            except Exception as e:
-                results.append({
-                    'token_index': i,
-                    'success': False,
-                    'error': str(e)
-                })
-        
-        return jsonify({
-            'success': True,
-            'results': results,
-            'total_processed': len(results)
-        })
-        
-    except Exception as e:
-        logger.error(f"Ошибка в batch API: {str(e)}")
-        return jsonify({
-            'success': False,
-            'error': str(e)
-        }), 500
-
-@app.route('/api/model_info')
-def model_info():
-    """Информация о модели"""
-    if model_artifacts is None:
-        return jsonify({
-            'success': False,
-            'error': 'Модель не загружена'
-        }), 503
-    
-    return jsonify({
-        'success': True,
-        'model_info': {
-            'version': MODEL_VERSION,
-            'type': model_artifacts.get('model_type', 'Unknown'),
-            'features_count': len(model_artifacts['feature_names']),
-            'feature_names': model_artifacts['feature_names'][:20],
-            'performance_metrics': model_artifacts.get('performance_metrics', {}),
-            'threshold': model_artifacts.get('best_threshold', 0.5),
-            'training_info': model_artifacts.get('training_info', {})
-        }
-    })
-
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({
-        'success': False,
-        'error': 'Эндпоинт не найден'
-    }), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({
-        'success': False,
-        'error': 'Внутренняя ошибка сервера'
-    }), 500
-
-# =============================================================================
-# ЗАПУСК ПРИЛОЖЕНИЯ (только для локальной разработки)
-# =============================================================================
-
-if __name__ == '__main__':
-    # Этот блок выполняется только при прямом запуске python app.py
-    # При запуске через gunicorn этот блок НЕ выполняется
-    
-    port = int(os.environ.get('PORT', 5000))
-    logger.info(f"✅ Локальный запуск на порту {port}")
-    
-    app.run(
-        host='0.0.0.0',
-        port=port,
-        debug=False
-    )
+    except Exception as
