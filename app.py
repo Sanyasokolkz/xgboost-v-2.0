@@ -190,11 +190,11 @@ def parse_alpha_one_text(text):
     return data
 
 def apply_feature_engineering(df, model_artifacts):
-    """Применяет feature engineering к входным данным"""
+    """Применяет feature engineering к входным данным - ПОЛНАЯ ВЕРСИЯ"""
     df = df.copy()
     
     try:
-        # Парсинг базовых значений
+        # 1. Парсинг базовых значений
         for col in ['market_cap', 'liquidity', 'volume_1min', 'last_volume']:
             if col in df.columns:
                 df[f'{col}_numeric'] = df[col].apply(parse_value)
@@ -208,7 +208,7 @@ def apply_feature_engineering(df, model_artifacts):
         if 'token_age' in df.columns:
             df['token_age_minutes'] = df['token_age'].apply(parse_time)
         
-        # Создаем ключевые признаки
+        # 2. КЛЮЧЕВЫЕ СООТНОШЕНИЯ (критично!)
         if 'liquidity_numeric' in df.columns and 'market_cap_numeric' in df.columns:
             df['liquidity_ratio'] = df['liquidity_numeric'] / (df['market_cap_numeric'] + 1)
             df['liquidity_ratio_log'] = np.log1p(df['liquidity_ratio'])
@@ -221,7 +221,7 @@ def apply_feature_engineering(df, model_artifacts):
             df['holders_per_mcap'] = df['total_holders'] / (df['market_cap_numeric'] / 1000 + 1)
             df['holder_density'] = np.log1p(df['holders_per_mcap'])
         
-        # Остальные признаки...
+        # 3. Анализ держателей
         holder_cols = ['green_holders', 'blue_holders', 'yellow_holders', 'circle_holders']
         available_holders = [col for col in holder_cols if col in df.columns]
         
@@ -232,32 +232,32 @@ def apply_feature_engineering(df, model_artifacts):
             if 'green_holders' in df.columns and 'blue_holders' in df.columns and 'total_holders' in df.columns:
                 df['good_holders_pct'] = (df['green_holders'] + df['blue_holders']) / (df['total_holders'] + 1) * 100
         
-        # Риск-скоринг
+        # 4. Риск-скоринг
         risk_cols = ['insiders_percent', 'dev_holds_percent', 'bundle_supply_percent']
         available_risk = [col for col in risk_cols if col in df.columns]
         if available_risk:
             df['total_risk_score'] = df[available_risk].fillna(0).sum(axis=1)
             df['max_risk_score'] = df[available_risk].fillna(0).max(axis=1)
         
-        # Снайпер-индикаторы
+        # 5. Снайпер-индикаторы
         if 'snipers_count' in df.columns and 'total_holders' in df.columns:
             df['sniper_ratio'] = df['snipers_count'] / (df['total_holders'] + 1)
             df['sniper_density'] = np.log1p(df['sniper_ratio'] * 100)
         
-        # Временные признаки
+        # 6. Временные признаки
         if 'token_age_minutes' in df.columns:
             df['log_age'] = np.log1p(df['token_age_minutes'])
             
             if 'volume_1min_numeric' in df.columns:
                 df['volume_per_age'] = df['volume_1min_numeric'] / (df['token_age_minutes'] + 1)
         
-        # Momentum
+        # 7. Momentum
         if 'volume_multiplier' in df.columns:
             df['momentum_score'] = np.log1p(df['volume_multiplier'])
             if 'liquidity_ratio' in df.columns:
                 df['momentum_liquidity'] = df['momentum_score'] * df['liquidity_ratio']
         
-        # Взаимодействия
+        # 8. Взаимодействия признаков
         if 'log_age' in df.columns and 'total_risk_score' in df.columns:
             df['age_risk_interaction'] = df['log_age'] * df['total_risk_score']
         
@@ -267,21 +267,61 @@ def apply_feature_engineering(df, model_artifacts):
         if 'total_holders' in df.columns and 'top10_percent' in df.columns:
             df['holders_concentration'] = df['total_holders'] * (100 - df['top10_percent']) / 100
         
-        # Дополнительные признаки (упрощенная версия)
+        # 9. ДОПОЛНИТЕЛЬНЫЕ ПРИЗНАКИ (из улучшенной модели)
+        
+        # Нелинейные трансформации
         if 'liquidity_ratio' in df.columns:
             df['liquidity_ratio_squared'] = df['liquidity_ratio'] ** 2
             df['liquidity_ratio_sqrt'] = np.sqrt(df['liquidity_ratio'].clip(0))
         
+        # Биннинг численных признаков
         if 'total_holders' in df.columns:
             df['holders_bins'] = pd.cut(df['total_holders'], 
                                        bins=[0, 50, 150, 300, 1000, float('inf')], 
                                        labels=[0, 1, 2, 3, 4]).astype(float)
         
+        if 'top10_percent' in df.columns:
+            df['concentration_level'] = pd.cut(df['top10_percent'], 
+                                              bins=[0, 20, 40, 60, 80, 100], 
+                                              labels=[0, 1, 2, 3, 4]).astype(float)
+        
+        # Комплексные взаимодействия
+        if 'insiders_percent' in df.columns and 'dev_holds_percent' in df.columns:
+            df['insider_dev_interaction'] = df.get('insiders_percent', 0) * df.get('dev_holds_percent', 0)
+        
+        if 'total_risk_score' in df.columns and 'top10_percent' in df.columns:
+            df['risk_concentration'] = df.get('total_risk_score', 0) * df.get('top10_percent', 0) / 100
+        
+        # Временные паттерны
         if 'token_age_minutes' in df.columns:
             df['is_fresh'] = (df['token_age_minutes'] < 30).astype(int)
             df['is_golden_hour'] = ((df['token_age_minutes'] >= 30) & 
                                    (df['token_age_minutes'] < 120)).astype(int)
             df['is_mature'] = (df['token_age_minutes'] >= 120).astype(int)
+        
+        # Качество держателей (расширенная версия)
+        if len(available_holders) >= 2 and 'total_holders' in df.columns:
+            df['quality_holder_ratio'] = df[available_holders].sum(axis=1) / (df['total_holders'] + 1)
+            df['holder_quality_score'] = (df.get('green_holders', 0) * 3 + 
+                                         df.get('blue_holders', 0) * 2 + 
+                                         df.get('yellow_holders', 0) * 1) / (df['total_holders'] + 1)
+        
+        # Ликвидность и объем паттерны
+        if all(col in df.columns for col in ['volume_1min_numeric', 'liquidity_numeric', 'market_cap_numeric']):
+            # Отношение объема к капитализации
+            df['volume_mcap_ratio'] = df['volume_1min_numeric'] / (df['market_cap_numeric'] + 1)
+            
+            # Эффективность ликвидности
+            df['liquidity_efficiency'] = df['volume_1min_numeric'] / (df['liquidity_numeric'] + 1)
+            
+            # Комбинированный показатель активности
+            df['activity_composite'] = (np.log1p(df['volume_mcap_ratio']) + 
+                                       np.log1p(df['liquidity_efficiency'])) / 2
+        
+        # Снайпер и инсайдер паттерны
+        if all(col in df.columns for col in ['snipers_count', 'total_holders']) and 'insiders_percent' in df.columns:
+            df['sniper_insider_combo'] = (df['snipers_count'] / (df['total_holders'] + 1)) * df.get('insiders_percent', 0)
+            df['manipulation_risk'] = (df.get('sniper_density', 0) + df.get('insiders_percent', 0)) / 2
         
         # Категориальные признаки
         if 'token_age_minutes' in df.columns and model_artifacts.get('label_encoder'):
@@ -291,10 +331,33 @@ def apply_feature_engineering(df, model_artifacts):
             try:
                 df['age_category_encoded'] = model_artifacts['label_encoder'].transform(age_category.fillna('unknown'))
             except:
-                df['age_category_encoded'] = 0
+                df['age_category_encoded'] = 0  # Fallback
+        
+        # Заполняем отсутствующие колонки нулями
+        expected_features = model_artifacts['feature_names']
+        logger.info(f"Ожидаемых признаков: {len(expected_features)}")
+        logger.info(f"Создано признаков: {len([col for col in df.columns if col in expected_features])}")
+        
+        missing_features = []
+        for feature in expected_features:
+            if feature not in df.columns:
+                df[feature] = 0.0
+                missing_features.append(feature)
+        
+        if missing_features:
+            logger.warning(f"Заполнены нулями отсутствующие признаки ({len(missing_features)}): {missing_features[:10]}...")
+        
+        logger.info("✅ Feature engineering завершен успешно")
         
     except Exception as e:
         logger.error(f"Ошибка в feature engineering: {str(e)}")
+        logger.error(traceback.format_exc())
+        
+        # В случае ошибки заполняем все ожидаемые признаки нулями
+        if 'model_artifacts' in locals() and model_artifacts:
+            for feature in model_artifacts['feature_names']:
+                if feature not in df.columns:
+                    df[feature] = 0.0
     
     return df
 
